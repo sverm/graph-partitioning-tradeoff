@@ -1,6 +1,6 @@
 name := "graph-partitioning-tradeoff"
 
-scalaVersion := "2.10.4"
+scalaVersion := "2.11.8"
 
 libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-core"    % "1.5.0",

@@ -1,11 +1,9 @@
 #!/bin/bash
 
-TIME=`date +%Y-%m-%d.%H:%M:%S`
-HOSTNAME=$(hostname)
-export OUTPUT_CSV_PATH=/home/yosub_shin_0/graph-partitioning-tradeoff-${TIME}.csv
-export GRAPH_FILE_PATH=hdfs://${HOSTNAME}/graph-data/lab_data_lj
-
-~/spark-1.5.0-bin-hadoop2.6/bin/spark-submit \
+~/$SPARK_SUBMIT/bin/spark-submit \
 --class GraphPartitioningTradeoff \
---master spark://${HOSTNAME}:7077 \
+--master spark://192.17.176.173:7077 \
+--total-executor-cores=128 --driver-memory 10g --executor-memory 48g --executor-cores 16\
+--conf spark.default.parallelism=128 \
+--conf spark.ui.showConsoleProgress=false \
 target/scala-2.10/graph-partitioning-tradeoff_2.10-0.1-SNAPSHOT.jar
