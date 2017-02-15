@@ -3,39 +3,30 @@ import java.io.{FileWriter, BufferedWriter}
 import org.apache.spark._
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.lib._
-import au.com.bytecode.opencsv.CSVWriter
 import scala.collection.JavaConverters._
 
 object GraphPartitioningTradeoff {
   def main(args: Array[String]) {
-    val outputCSVPath: String = sys.env("OUTPUT_CSV_PATH")
-    val outputCSVBufferedWriter = new BufferedWriter(new FileWriter(outputCSVPath))
-    val outputCSVWriter = new CSVWriter(outputCSVBufferedWriter)
-
-    val graphFilePath: String = sys.env("GRAPH_FILE_PATH")
-    val numIterationsList = List(1, 5, 10)
     val partitionStrategies = List(None, Some(PartitionStrategy.RandomVertexCut), Some(PartitionStrategy.EdgePartition1D), Some(PartitionStrategy.EdgePartition2D))
-    val algorithms = List("PageRank", "ShortestPaths")
-
-    val schemaArray = Array("algorithm", "partitioning_strategy", "num_iterations", "loading_time", "partitioning_time", "computation_time", "total_time")
-    var outputCSVRowList: List[Array[String]] = List()
-    try {
-      for (run <- (0 to 2).toList) {
-        for (algorithm <- algorithms) {
-          for (partitionStrategy <- partitionStrategies) {
-            for (numIterations <- numIterationsList) {
-              outputCSVRowList ::= runGraphAlgorithm(algorithm, partitionStrategy, graphFilePath, numIterations)
-            }
-          }
-        }
-      }
-    } finally {
-      outputCSVWriter.writeAll((List(schemaArray) ++ outputCSVRowList).asJava)
-      outputCSVBufferedWriter.close()
+    if (args.size < 4) {
+      print("Usage = ./run.sh [application] [graph file path] [partitioning strategy] [numItereations]")
     }
+    val algorithm = args(0)
+    val graphFilePath = args(1)
+    val partitionerName = args(2)
+    val partitioner = partitionerName match {
+      case "random" => Some(PartitionStrategy.RandomVertexCut)
+      case "1d" => Some(PartitionStrategy.EdgePartition1D)
+      case "2d" => Some(PartitionStrategy.EdgePartition2D)
+      case "none" => None
+    }
+
+    val numIterations = args(3).toInt
+
+    runGraphAlgorithm(algorithm, partitioner, graphFilePath, numIterations)
   }
 
-  def runGraphAlgorithm(algorithm: String, partitionStrategy: Option[PartitionStrategy], graphFilePath: String, numIterations: Int): Array[String] = {
+  def runGraphAlgorithm(algorithm: String, partitionStrategy: Option[PartitionStrategy], graphFilePath: String, numIterations: Int): Unit = {
     println(s"Running Graph Algorithm $algorithm with Partitioning Strategy: ${partitionStrategy.toString}, for graph: $graphFilePath, with numIterations: $numIterations")
     val conf = new SparkConf().setAppName("Graph Partitioning Tradeoff")
     val sc = new SparkContext(conf)
@@ -70,13 +61,5 @@ object GraphPartitioningTradeoff {
     val totalTime: Long = graphComputationDoneTimestamp - initialTimestamp
     println(s"Total time: $totalTime")
     sc.stop()
-    Array(
-      algorithm,
-      partitionStrategy.getOrElse("None").toString,
-      numIterations.toString,
-      graphLoadingTime.toString,
-      graphPartitioningTime.toString,
-      graphComputationTime.toString,
-      totalTime.toString)
   }
 }
