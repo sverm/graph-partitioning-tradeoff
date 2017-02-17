@@ -12,101 +12,87 @@ import scala.collection.mutable
 
 case class IngressHybridGingerPartition(
     partitions: Int = -1,
-    aggDir: AggregateDirection.Value = AggregateDirection.OutOnly,
+    aggDir: AggregateDirection.Value = AggregateDirection.InOnly,
     totNVerts: Long = 0,
     totNEdges: Long = 0,
     threshold: Int = 100)
   extends IngressEdgePartitioner {
-  require(threshold >= 0, s"Number of threshold ($threshold) cannot be negative.")
-  require(totNVerts > 0, s"Number of vertices ($totNVerts) cannot be non-positive.")
-  require(totNEdges > 0, s"Number of edges ($totNEdges) cannot be non-positive.")
+    require(threshold >= 0, s"Number of threshold ($threshold) cannot be negative.")
+    require(totNVerts > 0, s"Number of vertices ($totNVerts) cannot be non-positive.")
+    require(totNEdges > 0, s"Number of edges ($totNEdges) cannot be non-positive.")
 
-  def numPartitions: Int = partitions
+    def numPartitions: Int = partitions
 
-  private def hashVert(v: VertexId, partNum: Int): Int = {
-    val mixingPrime = 1125899906842597L
-    (((v * mixingPrime) % partNum).toInt + partNum) % partNum
-  }
+    def fromEdges[T <: Edge[_] : ClassTag](rdd: RDD[T]): RDD[T] = {
+      val partNum = if (numPartitions > 0) numPartitions else rdd.partitions.size
 
-  def fromEdges[T <: Edge[_] : ClassTag](rdd: RDD[T]): RDD[T] = {
-        val partNum = if (numPartitions > 0) numPartitions else rdd.partitions.size
-        aggDir match {
-            case AggregateDirection.InOnly =>
-                val ecut_edges = rdd.map{ e => (hashVert(e.dstId, partNum), e) }.
-                partitionBy(new HashPartitioner(partNum))
-                ecut_edges.mapPartitions { iter =>
-                      val messages = iter.toArray
-                      // per partition in degrees
-                      val indegrees = new mutable.HashMap[VertexId, mutable.ArrayBuffer[T]]
-                      val vertexPartMapping = new mutable.HashMap[VertexId, Int].withDefault( v => hashVert(v, partNum))
-                      val numPartEdges = Array.fill[Long](partNum)(0)
-                      val numPartVerts = Array.fill[Long](partNum)(0)
+      val hashVert = {(v: VertexId) => 
+        val mixingPrime = 1125899906842597L
+        (((v * mixingPrime) % partNum).toInt + partNum) % partNum
+      }
 
-                      messages.foreach{ message =>
-                          val k = message._2.dstId
-                          indegrees.get(k) match {
-                            case None => {
-                              indegrees.put(k, mutable.ArrayBuffer(message._2))
-                              numPartVerts(hashVert(k, partNum)) += 1
-                            }
-                            case degree => degree.get.append(message._2)
-                          }
-                          numPartEdges(hashVert(k, partNum)) += 1
-                      }
+      val getSrc: (T => VertexId) = aggDir match {
+        case AggregateDirection.InOnly => _.srcId
+        case AggregateDirection.OutOnly => _.dstId
+      }
 
-                      val outMessages = new mutable.ArrayBuffer[(Int, T)]
-                      indegrees.foreach { tup =>
-                        val dstId = tup._1
-                        val edges = tup._2
-                        if (edges.size <= threshold) {
-                          // Ginger goes here
-                          val partDegrees = Array.fill[Long](partNum)(0)
-                          edges.foreach { e => partDegrees(vertexPartMapping(e.srcId)) += 1 }
-                          val partScores = (0 until partNum) map { (part) =>
-                            partDegrees(part) - 0.5 * (numPartVerts(part) + (totNVerts.toFloat / totNEdges) * numPartEdges(part)) 
-                          }
+      val getDst: (T => VertexId) = aggDir match {
+        case AggregateDirection.InOnly => _.dstId
+        case AggregateDirection.OutOnly => _.srcId
+      }
 
-                          val curPart = hashVert(dstId, partNum)
-                          val bestPart = partScores.zipWithIndex.max._2
+      val ecut_edges = rdd.map{ e => (hashVert(getDst(e)), e) }.
+      partitionBy(new HashPartitioner(partNum))
+      ecut_edges.mapPartitions { iter =>
+        val messages = iter.toArray
+        // per partition in degrees
+        val indegrees = new mutable.HashMap[VertexId, mutable.ArrayBuffer[T]]
+        val vertexPartMapping = new mutable.HashMap[VertexId, Int].withDefault( v => hashVert(v))
+        val numPartEdges = Array.fill[Long](partNum)(0)
+        val numPartVerts = Array.fill[Long](partNum)(0)
 
-                          if (bestPart != curPart) {
-                            numPartVerts(curPart) -= 1
-                            numPartVerts(bestPart) += 1
-                            numPartEdges(curPart) -= edges.size
-                            numPartEdges(bestPart) += edges.size
-                            vertexPartMapping(dstId) = bestPart
-                          }
+        messages.foreach{ message =>
+          val k = getDst(message._2)
+          indegrees.get(k) match {
+            case None => {
+              indegrees.put(k, mutable.ArrayBuffer(message._2))
+              numPartVerts(hashVert(k)) += 1
+            }
+            case degree => degree.get.append(message._2)
+          }
+          numPartEdges(hashVert(k)) += 1
+        }
 
-                          outMessages.appendAll(edges.map( e => (bestPart, e)))
-                        } else {
-                          outMessages.appendAll(edges.map( e => (hashVert(e.srcId, partNum), e)))
-                        }
-                      }
-                      outMessages.toIterator
-                }.partitionBy(new HashPartitioner(partNum)).map{ _._2 }
+        val outMessages = new mutable.ArrayBuffer[(Int, T)]
+        indegrees.foreach { tup =>
+          val dstId = tup._1
+          val edges = tup._2
+          if (edges.size <= threshold) {
+            // Ginger goes here
+            val partDegrees = Array.fill[Long](partNum)(0)
+            edges.foreach { e => partDegrees(vertexPartMapping(getSrc(e))) += 1 }
+            val partScores = (0 until partNum) map { (part) =>
+              partDegrees(part) - 0.5 * (numPartVerts(part) + (totNVerts.toFloat / totNEdges) * numPartEdges(part)) 
+            }
 
-            case AggregateDirection.OutOnly =>
-                val ecut_edges = rdd.map{ e => (hashVert(e.srcId, partNum), e) }.
-                partitionBy(new HashPartitioner(partNum))
-                ecut_edges.mapPartitions { iter =>
-                      val messages = iter.toArray
-                      val outdegrees = new mutable.HashMap[VertexId, Int]
-                      messages.foreach{ message =>
-                          val k = message._2.srcId
-                          outdegrees.get(k) match {
-                            case None => outdegrees.put(k,1)
-                            case degree => outdegrees.put(k, degree.get + 1)
-                          }
-                      }
-                      messages.map{ message =>
-                      if (outdegrees(message._2.srcId) <= threshold) {
-                          message
-                      } else {
-                          (hashVert(message._2.dstId, partNum), message._2)
-                      }
-                    }.toIterator
-                }.partitionBy(new HashPartitioner(partNum)).map{ _._2 }
-       }
+            val curPart = hashVert(dstId)
+            val bestPart = partScores.zipWithIndex.max._2
+
+            if (bestPart != curPart) {
+              numPartVerts(curPart) -= 1
+              numPartVerts(bestPart) += 1
+              numPartEdges(curPart) -= edges.size
+              numPartEdges(bestPart) += edges.size
+              vertexPartMapping(dstId) = bestPart
+            }
+
+            outMessages.appendAll(edges.map( e => (bestPart, e)))
+          } else {
+            outMessages.appendAll(edges.map( e => (hashVert(getSrc(e)), e)))
+          }
+        }
+        outMessages.toIterator
+      }.partitionBy(new HashPartitioner(partNum)).map{ _._2 }
     }
 }
 
@@ -317,11 +303,14 @@ object SSSP {
 object GraphPartitioningTradeoff {
   def main(args: Array[String]) {
     if (args.size < 4) {
-      print("Usage = ./run.sh [application] [graph file path] [partitioning strategy] [numItereations]")
+      print("Usage = ./run.sh [application] [graph file path] [partitioning strategy] [numItereations] [[totNVerts]] [[totNEdges]]")
     }
     val algorithm = args(0)
     val graphFilePath = args(1)
     val partitionerName = args(2)
+    val totNVerts = if (args.size < 5) 0L else args(4).toLong
+    val totNEdges = if (args.size < 6) 0L else args(5).toLong
+
     val partitioner = partitionerName match {
       case "random" => Some(new IngressRandomVertexCut)
       case "1d" => Some(new IngressEdgePartition1D)
@@ -329,6 +318,7 @@ object GraphPartitioningTradeoff {
       case "oblivious" => Some(new IngressCorrectObliviousVertexCut)
       case "hdrf" => Some(new IngressHDRFVertexCut)
       case "hybrid" => Some(new IngressHybridPartition)
+      case "hybrid_ginger" => Some(new IngressHybridGingerPartition(totNVerts=totNVerts, totNEdges=totNEdges))
       case "none" => None
     }
 
